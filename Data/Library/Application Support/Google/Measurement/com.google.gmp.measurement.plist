@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>/google/measurement/app_instance_id</key>
+	<string>D5239D7F8824479FA0A3590B48B368EF</string>
+	<key>/google/measurement/app_version</key>
+	<string>1.0.17</string>
+	<key>/google/measurement/config_etag</key>
+	<string>18262150317091780937</string>
+	<key>/google/measurement/config_gmp_version</key>
+	<integer>111400</integer>
+	<key>/google/measurement/diversion_key</key>
+	<string>25D5B</string>
+	<key>/google/measurement/first_open_timestamp_ms</key>
+	<integer>1780905658880</integer>
+	<key>/google/measurement/gmp_app_id</key>
+	<string>1:506190533110:ios:28dbd94880f895f38c37d7</string>
+	<key>/google/measurement/last_backoff</key>
+	<real>0.0</real>
+	<key>/google/measurement/last_delete_stale</key>
+	<real>1780905659.1926799</real>
+	<key>/google/measurement/last_engagement_end</key>
+	<real>1780905675.62186</real>
+	<key>/google/measurement/last_failed_upload</key>
+	<real>0.0</real>
+	<key>/google/measurement/last_successful_upload</key>
+	<real>1780905678.2744761</real>
+	<key>/google/measurement/last_uploaded_event_millis</key>
+	<integer>1780905675621</integer>
+	<key>/google/measurement/midnight_offset</key>
+	<real>19523.400000000001</real>
+	<key>/google/measurement/os_version</key>
+	<string>26.3</string>
+	<key>/google/measurement/previous_bundled_consent_signals</key>
+	<string>G1--</string>
+	<key>/google/measurement/search_ad_last_attempt_timestamp</key>
+	<real>1780905659.8844919</real>
+	<key>/google/measurement/search_ad_number_of_retries</key>
+	<integer>1</integer>
+	<key>/google/measurement/session_number</key>
+	<integer>1</integer>
+	<key>/google/measurement/unmatched_first_open</key>
+	<integer>1</integer>
+</dict>
+</plist>
