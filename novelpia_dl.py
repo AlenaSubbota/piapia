@@ -30,19 +30,21 @@ SLEEP_BETWEEN = 1.5
 # Session
 # ---------------------------------------------------------------------------
 
-def build_session(cookie_str, cookie_file):
+def build_session(cookie_str, cookie_file, login_at=None):
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3.1 Safari/605.1.15"
         ),
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/json",
         "Origin": "https://global.novelpia.com",
         "Referer": "https://global.novelpia.com/",
-        "X-Requested-With": "XMLHttpRequest",
     })
+    if login_at:
+        s.headers["login-at"] = login_at.strip()
     if cookie_file:
         jar = http.cookiejar.MozillaCookieJar(cookie_file)
         jar.load(ignore_discard=True, ignore_expires=True)
@@ -62,41 +64,46 @@ def build_session(cookie_str, cookie_file):
 # API
 # ---------------------------------------------------------------------------
 
+class AuthError(RuntimeError):
+    """Raised when the server rejects us for not being logged in (expired login-at)."""
+
+
 def api_get(session, path, **params):
     r = session.get(f"{API_BASE}{path}", params=params, timeout=30)
     if r.status_code >= 400:
-        raise RuntimeError(f"HTTP {r.status_code} on {path}: {r.text[:300]}")
+        body = r.text
+        if "logged in" in body or "AUTH_ERROR" in body:
+            raise AuthError(f"login-at expired/invalid on {path}")
+        raise RuntimeError(f"HTTP {r.status_code} on {path}: {body[:300]}")
     data = r.json()
     if str(data.get("code", "0000")) != "0000":
         raise RuntimeError(f"API error {data.get('code')} on {path}: {data.get('errmsg')}")
     return data
 
 
+def refresh_login_at(session):
+    """Prompt the user to paste a fresh login-at token from the browser."""
+    print(
+        "\n[!] The login-at token expired (it only lives ~15 min).\n"
+        "    Grab a fresh one: in the browser DevTools → Network, open any chapter,\n"
+        "    click the /v1/novel/episode request, copy the value of the 'login-at'\n"
+        "    request header, and paste it below.\n"
+    )
+    token = input("    Paste fresh login-at (or press Enter to abort): ").strip()
+    if not token:
+        raise SystemExit("[!] Aborted — no token provided.")
+    session.headers["login-at"] = token
+    print("[*] Token updated, retrying…\n")
+
+
 def fetch_episode_meta(session, episode_no):
-    """Fetch episode metadata; returns the full result dict."""
-    # Try POST first (some endpoints require credentials in body), fall back to GET
-    for method in ("POST", "GET"):
-        if method == "POST":
-            r = session.post(
-                f"{API_BASE}/v1/novel/episode",
-                data={"episode_no": episode_no},
-                timeout=30,
-            )
-        else:
-            r = session.get(
-                f"{API_BASE}/v1/novel/episode",
-                params={"episode_no": episode_no},
-                timeout=30,
-            )
-        if r.status_code < 400:
-            data = r.json()
-            if str(data.get("code", "0000")) == "0000":
-                return data.get("result", {})
-        elif r.status_code == 500:
-            body = r.text
-            if "logged in" in body or "AUTH_ERROR" in body:
-                continue  # try next method
-    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+    """Fetch episode metadata; returns the full result dict. Refreshes token on auth failure."""
+    try:
+        data = api_get(session, "/v1/novel/episode", episode_no=episode_no)
+    except AuthError:
+        refresh_login_at(session)
+        data = api_get(session, "/v1/novel/episode", episode_no=episode_no)
+    return data.get("result", {})
 
 
 def novel_no_from_episode(session, episode_no):
@@ -218,6 +225,9 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--cookies")
     ap.add_argument("--cookie")
+    ap.add_argument("--login-at", dest="login_at",
+                    help="The 'login-at' request header (JWT) copied from the browser. "
+                         "Required for logged-in/free-after-login chapters.")
     ap.add_argument("--sleep", type=float, default=SLEEP_BETWEEN)
     ap.add_argument("--episodes", help="Comma-separated episode_no list to fetch instead of all")
     args = ap.parse_args()
@@ -225,7 +235,7 @@ def main():
     if not args.cookies and not args.cookie:
         ap.error("Provide --cookies <file> or --cookie <string>")
 
-    session = build_session(args.cookie, args.cookies)
+    session = build_session(args.cookie, args.cookies, args.login_at)
     cookie_names = [c.name for c in session.cookies]
     print(f"[*] Loaded cookies: {cookie_names}")
 
