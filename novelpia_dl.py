@@ -99,7 +99,13 @@ def fetch_episode_list(session, novel_no):
     episodes = []
     page = 1
     while True:
-        data = api_get(session, "/v1/novel/episode/list", novel_no=novel_no, page=page)
+        try:
+            data = api_get(session, "/v1/novel/episode/list", novel_no=novel_no, page=page)
+        except RuntimeError as e:
+            # "The episode does not exist" on an out-of-range page = normal end of list
+            if "does not exist" in str(e) or "0002" in str(e):
+                break
+            raise
         result = data.get("result", {})
         page_eps = result.get("episode") or result.get("episodes") or result.get("list") or []
         if not page_eps:
