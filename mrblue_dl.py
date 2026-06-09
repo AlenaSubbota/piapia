@@ -213,6 +213,19 @@ def write_cbz(decoded: list[tuple[int, bytes]], out_path: Path) -> None:
             zf.writestr(f"{idx:04d}.{_ext(img)}", img)
 
 
+def merge_cbz(cbz_paths: list[Path], out_path: Path) -> None:
+    """Merge multiple CBZ files into one, re-numbering pages sequentially."""
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as out_zf:
+        idx = 1
+        for cbz in cbz_paths:
+            with zipfile.ZipFile(cbz, "r") as in_zf:
+                for name in sorted(in_zf.namelist()):
+                    data = in_zf.read(name)
+                    ext = Path(name).suffix
+                    out_zf.writestr(f"{idx:04d}{ext}", data)
+                    idx += 1
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -233,6 +246,8 @@ def main():
                     help="Path to mrblue_decode.mjs (default: next to this script)")
     ap.add_argument("--keep-temp", action="store_true",
                     help="Keep the per-chapter temp dir with raw/decoded images")
+    ap.add_argument("--bundle", type=int, default=0, metavar="N",
+                    help="Merge every N chapters into one CBZ (e.g. --bundle 5)")
     args = ap.parse_args()
 
     if not args.cookies and not args.cookie:
@@ -256,6 +271,22 @@ def main():
         chapters = range(args.from_ch, args.to_ch + 1)
     else:
         chapters = [args.from_ch]
+
+    pending_cbz: list[tuple[int, Path]] = []  # (ch_no, path) awaiting bundle
+
+    def flush_bundle(force=False):
+        if not args.bundle or not pending_cbz:
+            return
+        if not force and len(pending_cbz) < args.bundle:
+            return
+        first, last = pending_cbz[0][0], pending_cbz[-1][0]
+        paths = [p for _, p in pending_cbz]
+        merged = out_dir / f"{args.comic}_ch{first:04d}-ch{last:04d}.cbz"
+        merge_cbz(paths, merged)
+        print(f"\n[+] Bundle {merged.name} ({merged.stat().st_size:,} bytes, {len(paths)} chapters)")
+        for p in paths:
+            p.unlink()
+        pending_cbz.clear()
 
     for ch_no in chapters:
         print(f"\n[*] Chapter {ch_no}…")
@@ -329,7 +360,14 @@ def main():
             print(f"  [+] {cbz_path} ({cbz_path.stat().st_size:,} bytes, {len(decoded)} pages)")
         if not args.keep_temp:
             shutil.rmtree(work, ignore_errors=True)
+
+        if args.bundle and decoded:
+            pending_cbz.append((ch_no, cbz_path))
+            flush_bundle()
+
         time.sleep(args.sleep)
+
+    flush_bundle(force=True)  # merge any leftover chapters
 
 
 if __name__ == "__main__":
