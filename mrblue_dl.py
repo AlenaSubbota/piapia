@@ -9,11 +9,11 @@ pip install requests
 """
 
 import argparse
-import hashlib
 import http.cookiejar
+import random
+import string
 import sys
 import time
-import uuid
 import zipfile
 from pathlib import Path
 
@@ -56,27 +56,23 @@ def build_session(cookie_str, cookie_file):
     return s
 
 
-def _auth_token(path: str) -> str:
-    """Compute x-auth-token for a request path.
-    The browser sends an MD5-based token; exact formula TBD —
-    we try several candidates and will update once confirmed."""
-    # Candidate: MD5 of the path string
-    return hashlib.md5(path.encode()).hexdigest()
+def _auth_token() -> str:
+    """Generate x-auth-token: 32 random hex chars (confirmed from viewer JS source)."""
+    return ''.join(random.choices('0123456789abcdef', k=32))
 
 
 def init_session(session) -> dict:
     """Call /api/v1/session to get the rolling x-authorization token."""
-    client_uuid = str(uuid.uuid4())
+    import uuid as _uuid
+    client_uuid = str(_uuid.uuid4())
     path = f"/api/v1/session?uuid={client_uuid}"
-    session.headers["x-auth-token"] = _auth_token(path)
+    session.headers["x-auth-token"] = _auth_token()
     r = session.get(f"{VIEWER_BASE}{path}", timeout=30)
     r.raise_for_status()
-    # Server returns x-authorization in response; store it for subsequent calls
     x_auth = r.headers.get("x-authorization") or r.headers.get("X-Authorization")
     if x_auth:
         session.headers["x-authorization"] = x_auth
     data = r.json()
-    # mrblue-auth-token may come from here too
     token = (data.get("authToken") or data.get("token")
              or data.get("mrblueAuthToken") or "")
     if token:
@@ -88,16 +84,12 @@ def init_session(session) -> dict:
 # Chapter data
 # ---------------------------------------------------------------------------
 
-def fetch_chapter_pages(session, comic_id: str, chapter_no: int,
-                        payment_type: str = "PPT01") -> dict:
-    path = f"/api/v1/continue/{comic_id}/{chapter_no}"
-    session.headers["x-auth-token"] = _auth_token(path)
-    r = session.post(
-        f"{VIEWER_BASE}{path}",
-        data={"ppt": payment_type},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
+def fetch_chapter_pages(session, comic_id: str, chapter_no: int) -> dict:
+    """Use /api/v4/contents/access endpoint (confirmed from browser DevTools)."""
+    path = f"/api/v4/contents/access/{comic_id}/{chapter_no}?channel=PC"
+    session.headers["x-auth-token"] = _auth_token()
+    session.headers["Referer"] = f"{VIEWER_BASE}/comics/{comic_id}/{chapter_no}?ppt=PPT01"
+    r = session.get(f"{VIEWER_BASE}{path}", timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -153,7 +145,7 @@ def _ext(data: bytes) -> str:
 
 
 def fetch_image(session, path: str, nonce_code: str) -> tuple[bytes, str]:
-    session.headers["x-auth-token"] = _auth_token(path)
+    session.headers["x-auth-token"] = _auth_token()
     r = session.get(f"{VIEWER_BASE}{path}", timeout=60)
     r.raise_for_status()
     img = decrypt_image(r.content, nonce_code)
