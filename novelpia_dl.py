@@ -251,16 +251,29 @@ def main():
     # Fetch content
     chapters = []
     ok = skip = 0
+    auth_failures = 0
+    AUTH_FAIL_LIMIT = 5  # stop early if auth keeps failing
     for i, ep_no in enumerate(episode_nos, 1):
         print(f"  [{i}/{len(episode_nos)}] ep {ep_no}…", end=" ", flush=True)
         ch = fetch_episode_content(session, ep_no)
         if ch is None or not ch["epi_content"].strip():
             print("skipped")
             skip += 1
+            auth_failures += 1
+            if auth_failures >= AUTH_FAIL_LIMIT and ok == 0:
+                print(
+                    f"\n[!] {AUTH_FAIL_LIMIT} consecutive failures with no successes — "
+                    "likely missing LOGINKEY cookie. Stopping early.\n"
+                    "[*] Get fresh cookies (USERKEY, TKEY, LOGINKEY) from your browser:\n"
+                    "    Safari: Develop → Show Web Inspector → Storage → Cookies\n"
+                    "    Chrome: F12 → Application → Cookies → global.novelpia.com"
+                )
+                break
         else:
             print(f"ok — {ch['epi_title']!r}")
             chapters.append(ch)
             ok += 1
+            auth_failures = 0  # reset on success
         time.sleep(args.sleep)
 
     print(f"\n[*] {ok} fetched, {skip} skipped.")
