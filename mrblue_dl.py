@@ -5,19 +5,20 @@ Usage:
     python mrblue_dl.py --comic wt_000078468 --from-chapter 1 --to-chapter 5 \
         --cookie "MrblueAuth=...; SaveLogin=..." --out ./output
 
-pip install requests
+pip install "httpx[http2]"
+
+NOTE: MrBlue's server tarpits plain HTTP/1.1 API requests and only responds
+over HTTP/2 (like the browser), so this uses httpx with http2=True.
 """
 
 import argparse
 import http.cookiejar
 import random
-import string
-import sys
 import time
 import zipfile
 from pathlib import Path
 
-import requests
+import httpx
 
 VIEWER_BASE = "https://viewer.mrblue.com"
 SLEEP_PAGE = 0.3
@@ -31,8 +32,7 @@ MAX_RETRIES = 3
 # ---------------------------------------------------------------------------
 
 def build_session(cookie_str, cookie_file):
-    s = requests.Session()
-    s.headers.update({
+    headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
@@ -49,19 +49,21 @@ def build_session(cookie_str, cookie_file):
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
-    })
+    }
+    # http2=True is essential: the server tarpits HTTP/1.1 API calls.
+    s = httpx.Client(http2=True, headers=headers, timeout=REQUEST_TIMEOUT,
+                     follow_redirects=True)
     if cookie_file:
         jar = http.cookiejar.MozillaCookieJar(cookie_file)
         jar.load(ignore_discard=True, ignore_expires=True)
-        s.cookies.update(jar)
+        for c in jar:
+            s.cookies.set(c.name, c.value, domain=c.domain or ".mrblue.com")
     if cookie_str:
         for part in cookie_str.split(";"):
             part = part.strip()
             if "=" in part:
                 k, v = part.split("=", 1)
-                k, v = k.strip(), v.strip()
-                for domain in (".mrblue.com", "mrblue.com", "viewer.mrblue.com", "m.mrblue.com"):
-                    s.cookies.set(k, v, domain=domain)
+                s.cookies.set(k.strip(), v.strip(), domain=".mrblue.com")
     return s
 
 
@@ -70,37 +72,17 @@ def _auth_token() -> str:
     return ''.join(random.choices('0123456789abcdef', k=32))
 
 
-def init_session(session) -> dict:
-    """Call /api/v1/session to get the rolling x-authorization token."""
-    import uuid as _uuid
-    client_uuid = str(_uuid.uuid4())
-    path = f"/api/v1/session?uuid={client_uuid}"
-    session.headers["x-auth-token"] = _auth_token()
-    r = session.get(f"{VIEWER_BASE}{path}", timeout=30)
-    r.raise_for_status()
-    x_auth = r.headers.get("x-authorization") or r.headers.get("X-Authorization")
-    if x_auth:
-        session.headers["x-authorization"] = x_auth
-    data = r.json()
-    token = (data.get("authToken") or data.get("token")
-             or data.get("mrblueAuthToken") or "")
-    if token:
-        session.headers["mrblue-auth-token"] = token
-    return data
-
-
 # ---------------------------------------------------------------------------
 # Chapter data
 # ---------------------------------------------------------------------------
 
-def _get_with_retry(session, url, **kwargs):
+def _get_with_retry(session, url, headers=None):
     """GET with retry/backoff on timeouts and transient connection errors."""
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT)
     last = None
     for attempt in range(MAX_RETRIES):
         try:
-            return session.get(url, **kwargs)
-        except (requests.Timeout, requests.ConnectionError) as e:
+            return session.get(url, headers=headers)
+        except (httpx.TimeoutException, httpx.TransportError) as e:
             last = e
             wait = 2 ** attempt
             print(f"    (timeout/conn error, retry in {wait}s…)")
@@ -111,9 +93,11 @@ def _get_with_retry(session, url, **kwargs):
 def fetch_chapter_pages(session, comic_id: str, chapter_no: int) -> dict:
     """Use /api/v4/contents/access endpoint (confirmed from browser DevTools)."""
     path = f"/api/v4/contents/access/{comic_id}/{chapter_no}?channel=PC"
-    session.headers["x-auth-token"] = _auth_token()
-    session.headers["Referer"] = f"{VIEWER_BASE}/comics/{comic_id}/{chapter_no}?ppt=PPT01"
-    r = _get_with_retry(session, f"{VIEWER_BASE}{path}")
+    headers = {
+        "x-auth-token": _auth_token(),
+        "Referer": f"{VIEWER_BASE}/comics/{comic_id}/{chapter_no}?ppt=PPT01",
+    }
+    r = _get_with_retry(session, f"{VIEWER_BASE}{path}", headers=headers)
     r.raise_for_status()
     return r.json()
 
@@ -152,8 +136,8 @@ def _ext(data: bytes) -> str:
 
 
 def fetch_image(session, path: str, nonce_code: str) -> tuple[bytes, str]:
-    session.headers["x-auth-token"] = _auth_token()
-    r = session.get(f"{VIEWER_BASE}{path}", timeout=60)
+    r = _get_with_retry(session, f"{VIEWER_BASE}{path}",
+                        headers={"x-auth-token": _auth_token()})
     r.raise_for_status()
     img = decrypt_image(r.content, nonce_code)
     ext = _ext(img)
@@ -238,7 +222,7 @@ def main():
         print(f"\n[*] Chapter {ch_no}…")
         try:
             ch_data = fetch_chapter_pages(session, args.comic, ch_no)
-        except requests.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             print(f"  [!] HTTP {e.response.status_code}: {e.response.text[:300]}")
             continue
         except Exception as e:

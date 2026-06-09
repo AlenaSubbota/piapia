@@ -2,3 +2,4 @@ requests>=2.31
 ebooklib>=0.18
 beautifulsoup4>=4.12
 lxml>=5.0
+httpx[http2]>=0.27
