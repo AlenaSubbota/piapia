@@ -97,7 +97,7 @@ def fetch_novel_info(session, novel_no):
 
 def fetch_episode_list(session, novel_no):
     episodes = []
-    page = 0
+    page = 1
     while True:
         data = api_get(session, "/v1/novel/episode/list", novel_no=novel_no, page=page)
         result = data.get("result", {})
