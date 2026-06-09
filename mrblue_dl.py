@@ -5,15 +5,22 @@ Usage:
     python mrblue_dl.py --comic wt_000078468 --from-chapter 1 --to-chapter 5 \
         --cookie "MrblueAuth=...; SaveLogin=..." --out ./output
 
-pip install "httpx[http2]"
+Requirements:
+  * Python: pip install "httpx[http2]"
+  * Node.js (for image decryption), plus these files in the same folder as the
+    script: mrblue_decode.mjs, bee.wasm, wasm_exec.js
 
-NOTE: MrBlue's server tarpits plain HTTP/1.1 API requests and only responds
-over HTTP/2 (like the browser), so this uses httpx with http2=True.
+Notes:
+  * MrBlue's API tarpits plain HTTP/1.1 and only answers over HTTP/2 (like the
+    browser), so this uses httpx with http2=True.
+  * Images are encrypted by a WASM module (bee.wasm). We download the raw bytes
+    and decrypt them with the site's own decode() via the Node helper.
 """
 
 import argparse
 import http.cookiejar
 import random
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -109,15 +116,11 @@ def fetch_chapter_pages(session, comic_id: str, chapter_no: int) -> dict:
 # ---------------------------------------------------------------------------
 # Image fetch + decryption
 # ---------------------------------------------------------------------------
-
-def decrypt_image(data: bytes, nonce_code: str) -> bytes:
-    """Decrypt image bytes — algorithm confirmed from bee.wasm: bitwise NOT of each byte."""
-    if _is_image(data):
-        return data
-    candidate = bytes(b ^ 0xff for b in data)
-    if _is_image(candidate):
-        return candidate
-    return data
+#
+# MrBlue encrypts images with a position-permutation + per-byte transform
+# implemented in bee.wasm. Re-implementing it in Python is fragile (and breaks
+# whenever MrBlue ships a new bee.wasm), so we download the raw encrypted bytes
+# and hand them to the real WASM via a tiny Node helper (mrblue_decode.mjs).
 
 
 def _is_image(data: bytes) -> bool:
@@ -150,13 +153,25 @@ def image_url(path: str, is_hd: bool) -> str:
     return base + path
 
 
-def fetch_image(session, path: str, nonce_code: str, is_hd: bool) -> tuple[bytes, str]:
+def fetch_encrypted(session, path: str, is_hd: bool) -> bytes:
+    """Download the raw (still-encrypted) image bytes."""
     r = _get_with_retry(session, image_url(path, is_hd),
                         headers={"x-auth-token": _auth_token()})
     r.raise_for_status()
-    img = decrypt_image(r.content, nonce_code)
-    ext = _ext(img)
-    return img, ext
+    return r.content
+
+
+def decode_dir(node_bin: str, decoder: Path, work_dir: Path) -> None:
+    """Run the Node/WASM helper to decrypt every *.enc in work_dir."""
+    import subprocess
+    proc = subprocess.run(
+        [node_bin, str(decoder), str(work_dir)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"decoder failed (rc={proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +206,11 @@ def fetch_chapter_list(session, comic_id: str) -> list[dict]:
 # CBZ writer
 # ---------------------------------------------------------------------------
 
-def write_cbz(pages: list[tuple[bytes, str]], out_path: Path) -> None:
+def write_cbz(decoded: list[tuple[int, bytes]], out_path: Path) -> None:
+    """Zip decoded pages (page_number, bytes) into a CBZ, named by reading order."""
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
-        for i, (img, ext) in enumerate(pages, 1):
-            zf.writestr(f"{i:04d}.{ext}", img)
+        for idx, (_pn, img) in enumerate(sorted(decoded), 1):
+            zf.writestr(f"{idx:04d}.{_ext(img)}", img)
 
 
 # ---------------------------------------------------------------------------
@@ -212,11 +228,19 @@ def main():
     ap.add_argument("--cookies", help="Netscape cookie file")
     ap.add_argument("--cookie", help='Cookie string: "MrblueAuth=...; SaveLogin=..."')
     ap.add_argument("--sleep", type=float, default=SLEEP_CHAPTER)
-    ap.add_argument("--debug", action="store_true", help="Dump raw first image to disk for inspection")
+    ap.add_argument("--node", default="node", help="Path to the node binary")
+    ap.add_argument("--decoder", default=None,
+                    help="Path to mrblue_decode.mjs (default: next to this script)")
+    ap.add_argument("--keep-temp", action="store_true",
+                    help="Keep the per-chapter temp dir with raw/decoded images")
     args = ap.parse_args()
 
     if not args.cookies and not args.cookie:
         ap.error("Provide --cookies <file> or --cookie <string>")
+
+    decoder = Path(args.decoder) if args.decoder else Path(__file__).with_name("mrblue_decode.mjs")
+    if not decoder.exists():
+        ap.error(f"decoder not found: {decoder} (download mrblue_decode.mjs, bee.wasm, wasm_exec.js)")
 
     session = build_session(args.cookie, args.cookies)
     out_dir = Path(args.out)
@@ -262,28 +286,49 @@ def main():
             print(f"  [!] No pages. Full response keys: {list(ch_data.keys())} / resp keys: {list(resp.keys())}")
             continue
 
-        images = []
-        for pg in pages:
-            path = pg["path"]
-            pn = pg.get("pn", "?")
+        # 1) Download all encrypted pages into a temp dir.
+        work = out_dir / f".tmp_ch{ch_no:04d}"
+        work.mkdir(parents=True, exist_ok=True)
+        n_ok = 0
+        for i, pg in enumerate(pages, 1):
+            pn = pg.get("pn", i)
             print(f"    p{pn}…", end=" ", flush=True)
             try:
-                img, ext = fetch_image(session, path, nonce, is_hd)
-                if ext == "bin" and args.debug:
-                    dbg = out_dir / f"debug_ch{ch_no}_p{pn}_raw.bin"
-                    dbg.write_bytes(img)
-                    print(f"encrypted? saved raw→{dbg}")
-                else:
-                    print(f"{ext} {len(img):,}B")
-                images.append((img, ext))
+                enc = fetch_encrypted(session, pg["path"], is_hd)
+                (work / f"{i:04d}.enc").write_bytes(enc)
+                print(f"{len(enc):,}B")
+                n_ok += 1
             except Exception as e:
                 print(f"fail: {e}")
             time.sleep(SLEEP_PAGE)
 
-        if images:
+        if n_ok == 0:
+            print("  [!] No pages downloaded.")
+            if not args.keep_temp:
+                shutil.rmtree(work, ignore_errors=True)
+            continue
+
+        # 2) Decrypt them all in one WASM/Node pass.
+        print(f"  [*] Decrypting {n_ok} page(s) via {decoder.name}…")
+        try:
+            decode_dir(args.node, decoder, work)
+        except Exception as e:
+            print(f"  [!] Decode failed: {e}")
+            print(f"      (raw pages kept in {work})")
+            continue
+
+        # 3) Collect decoded pages and zip to CBZ.
+        decoded = []
+        for enc_file in sorted(work.glob("*.enc")):
+            dec_file = enc_file.with_suffix("")
+            if dec_file.exists():
+                decoded.append((int(dec_file.stem), dec_file.read_bytes()))
+        if decoded:
             cbz_path = out_dir / f"{args.comic}_ch{ch_no:04d}.cbz"
-            write_cbz(images, cbz_path)
-            print(f"  [+] {cbz_path} ({cbz_path.stat().st_size:,} bytes)")
+            write_cbz(decoded, cbz_path)
+            print(f"  [+] {cbz_path} ({cbz_path.stat().st_size:,} bytes, {len(decoded)} pages)")
+        if not args.keep_temp:
+            shutil.rmtree(work, ignore_errors=True)
         time.sleep(args.sleep)
 
 
