@@ -68,12 +68,18 @@ class AuthError(RuntimeError):
     """Raised when the server rejects us for not being logged in (expired login-at)."""
 
 
+class AdvertisementEpisode(RuntimeError):
+    """Raised when the episode requires watching an ad to unlock."""
+
+
 def api_get(session, path, **params):
     r = session.get(f"{API_BASE}{path}", params=params, timeout=30)
     if r.status_code >= 400:
         body = r.text
         if "logged in" in body or "AUTH_ERROR" in body:
             raise AuthError(f"login-at expired/invalid on {path}")
+        if "ADVERTISEMENT_EPISODE" in body or "0008" in body:
+            raise AdvertisementEpisode()
         raise RuntimeError(f"HTTP {r.status_code} on {path}: {body[:300]}")
     data = r.json()
     if str(data.get("code", "0000")) != "0000":
@@ -103,6 +109,8 @@ def fetch_episode_meta(session, episode_no):
     except AuthError:
         refresh_login_at(session)
         data = api_get(session, "/v1/novel/episode", episode_no=episode_no)
+    except AdvertisementEpisode:
+        raise
     return data.get("result", {})
 
 
@@ -151,6 +159,8 @@ def fetch_episode_list(session, novel_no):
 def fetch_episode_content(session, episode_no, title_hint=None):
     try:
         meta = fetch_episode_meta(session, episode_no)
+    except AdvertisementEpisode:
+        return None  # silent skip
     except Exception as e:
         print(f"    ! meta fail ep {episode_no}: {e}")
         return None
