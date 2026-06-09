@@ -21,6 +21,10 @@ from pathlib import Path
 import httpx
 
 VIEWER_BASE = "https://viewer.mrblue.com"
+# Image hosts (from Main.js): SD / HD / V2 (legacy /v2/ paths)
+SD_BASE = "https://comics-c.mrblue.com"
+HD_BASE = "https://comicshd-c.mrblue.com"
+V2_BASE = "https://comics.mrblue.com"
 SLEEP_PAGE = 0.3
 SLEEP_CHAPTER = 1.5
 REQUEST_TIMEOUT = 60
@@ -135,8 +139,19 @@ def _ext(data: bytes) -> str:
     return "bin"
 
 
-def fetch_image(session, path: str, nonce_code: str) -> tuple[bytes, str]:
-    r = _get_with_retry(session, f"{VIEWER_BASE}{path}",
+def image_url(path: str, is_hd: bool) -> str:
+    """Build full image URL — host depends on path/quality (from Main.js getImageUrl)."""
+    if "/v2/" in path:
+        base = V2_BASE
+    elif is_hd:
+        base = HD_BASE
+    else:
+        base = SD_BASE
+    return base + path
+
+
+def fetch_image(session, path: str, nonce_code: str, is_hd: bool) -> tuple[bytes, str]:
+    r = _get_with_retry(session, image_url(path, is_hd),
                         headers={"x-auth-token": _auth_token()})
     r.raise_for_status()
     img = decrypt_image(r.content, nonce_code)
@@ -232,9 +247,16 @@ def main():
         # v4 API wraps data in "response" key
         resp = ch_data.get("response", ch_data)
         nonce = resp.get("nonceCode", ch_data.get("nonceCode", "0"))
-        quality = args.quality
-        pages = resp.get(quality) or resp.get("hd") or resp.get("sd") or []
-        print(f"  [*] {len(pages)} pages | nonce={nonce}")
+        # Pick requested quality, falling back to whichever is available.
+        used_quality = None
+        for q in (args.quality, "hd", "sd"):
+            if resp.get(q):
+                used_quality, pages = q, resp[q]
+                break
+        else:
+            pages = []
+        is_hd = used_quality == "hd"
+        print(f"  [*] {len(pages)} pages | quality={used_quality} | nonce={nonce}")
 
         if not pages:
             print(f"  [!] No pages. Full response keys: {list(ch_data.keys())} / resp keys: {list(resp.keys())}")
@@ -246,7 +268,7 @@ def main():
             pn = pg.get("pn", "?")
             print(f"    p{pn}…", end=" ", flush=True)
             try:
-                img, ext = fetch_image(session, path, nonce)
+                img, ext = fetch_image(session, path, nonce, is_hd)
                 if ext == "bin" and args.debug:
                     dbg = out_dir / f"debug_ch{ch_no}_p{pn}_raw.bin"
                     dbg.write_bytes(img)
