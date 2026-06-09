@@ -36,10 +36,17 @@ def build_session(cookie_str, cookie_file):
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
         ),
         "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Origin": VIEWER_BASE,
         "Referer": f"{VIEWER_BASE}/",
         "x-client-agent": "daddy-desktop/2.40.3",
+        "x-wasm-support": "Y",
+        "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
     })
     if cookie_file:
         jar = http.cookiejar.MozillaCookieJar(cookie_file)
@@ -218,6 +225,9 @@ def main():
         print(f"\n[*] Chapter {ch_no}…")
         try:
             ch_data = fetch_chapter_pages(session, args.comic, ch_no)
+        except requests.HTTPError as e:
+            print(f"  [!] HTTP {e.response.status_code}: {e.response.text[:300]}")
+            continue
         except Exception as e:
             print(f"  [!] Failed: {e}")
             continue
