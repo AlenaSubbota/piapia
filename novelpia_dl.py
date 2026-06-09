@@ -52,7 +52,9 @@ def build_session(cookie_str, cookie_file):
             part = part.strip()
             if "=" in part:
                 k, v = part.split("=", 1)
-                s.cookies.set(k.strip(), v.strip(), domain=".novelpia.com")
+                k, v = k.strip(), v.strip()
+                for domain in (".novelpia.com", "novelpia.com", "global.novelpia.com", "api-global.novelpia.com"):
+                    s.cookies.set(k, v, domain=domain)
     return s
 
 
@@ -203,6 +205,8 @@ def main():
         ap.error("Provide --cookies <file> or --cookie <string>")
 
     session = build_session(args.cookie, args.cookies)
+    cookie_names = [c.name for c in session.cookies]
+    print(f"[*] Loaded cookies: {cookie_names}")
 
     # Resolve novel_no
     if args.viewer:
