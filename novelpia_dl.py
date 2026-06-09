@@ -74,8 +74,29 @@ def api_get(session, path, **params):
 
 def fetch_episode_meta(session, episode_no):
     """Fetch episode metadata; returns the full result dict."""
-    data = api_get(session, "/v1/novel/episode", episode_no=episode_no)
-    return data.get("result", {})
+    # Try POST first (some endpoints require credentials in body), fall back to GET
+    for method in ("POST", "GET"):
+        if method == "POST":
+            r = session.post(
+                f"{API_BASE}/v1/novel/episode",
+                data={"episode_no": episode_no},
+                timeout=30,
+            )
+        else:
+            r = session.get(
+                f"{API_BASE}/v1/novel/episode",
+                params={"episode_no": episode_no},
+                timeout=30,
+            )
+        if r.status_code < 400:
+            data = r.json()
+            if str(data.get("code", "0000")) == "0000":
+                return data.get("result", {})
+        elif r.status_code == 500:
+            body = r.text
+            if "logged in" in body or "AUTH_ERROR" in body:
+                continue  # try next method
+    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
 
 
 def novel_no_from_episode(session, episode_no):
