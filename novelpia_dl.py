@@ -295,36 +295,43 @@ def main():
     chapters = []
     ok = skip = 0
     auth_failures = 0
-    AUTH_FAIL_LIMIT = 5  # stop early if auth keeps failing
-    for i, ep_no in enumerate(episode_nos, 1):
-        print(f"  [{i}/{len(episode_nos)}] ep {ep_no}…", end=" ", flush=True)
-        ch = fetch_episode_content(session, ep_no, title_hint=title_by_ep.get(ep_no))
-        if ch is None or not ch["epi_content"].strip():
-            print("skipped")
-            skip += 1
-            auth_failures += 1
-            if auth_failures >= AUTH_FAIL_LIMIT and ok == 0:
-                print(
-                    f"\n[!] {AUTH_FAIL_LIMIT} consecutive failures with no successes — "
-                    "likely a missing/expired login-at token.\n"
-                    "    Pass a fresh --login-at value from the browser."
-                )
-                break
-        else:
-            print(f"ok — {ch['epi_title']!r}")
-            chapters.append(ch)
-            ok += 1
-            auth_failures = 0  # reset on success
-        time.sleep(args.sleep)
+    AUTH_FAIL_LIMIT = 5
+    out_path = Path(args.out) if args.out else Path(f"{title}.epub")
+
+    def save():
+        if not chapters:
+            print("[!] Nothing collected — nothing to save.")
+            return
+        print(f"\n[*] Building EPUB ({len(chapters)} chapters) → {out_path}…")
+        build_epub(novel_info, chapters, out_path)
+        print(f"[+] Saved: {out_path} ({out_path.stat().st_size:,} bytes)")
+
+    try:
+        for i, ep_no in enumerate(episode_nos, 1):
+            print(f"  [{i}/{len(episode_nos)}] ep {ep_no}…", end=" ", flush=True)
+            ch = fetch_episode_content(session, ep_no, title_hint=title_by_ep.get(ep_no))
+            if ch is None or not ch["epi_content"].strip():
+                print("skipped")
+                skip += 1
+                auth_failures += 1
+                if auth_failures >= AUTH_FAIL_LIMIT and ok == 0:
+                    print(
+                        f"\n[!] {AUTH_FAIL_LIMIT} consecutive failures with no successes — "
+                        "likely a missing/expired login-at token.\n"
+                        "    Pass a fresh --login-at value from the browser."
+                    )
+                    break
+            else:
+                print(f"ok — {ch['epi_title']!r}")
+                chapters.append(ch)
+                ok += 1
+                auth_failures = 0
+            time.sleep(args.sleep)
+    except KeyboardInterrupt:
+        print(f"\n[*] Interrupted after {ok} chapters.")
 
     print(f"\n[*] {ok} fetched, {skip} skipped.")
-    if not chapters:
-        sys.exit("[!] Nothing collected — check cookies or novel_no.")
-
-    out_path = Path(args.out) if args.out else Path(f"{title}.epub")
-    print(f"[*] Building EPUB → {out_path}…")
-    build_epub(novel_info, chapters, out_path)
-    print(f"[+] Done: {out_path} ({out_path.stat().st_size:,} bytes)")
+    save()
 
 
 if __name__ == "__main__":
