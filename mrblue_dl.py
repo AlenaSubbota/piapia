@@ -22,6 +22,8 @@ import requests
 VIEWER_BASE = "https://viewer.mrblue.com"
 SLEEP_PAGE = 0.3
 SLEEP_CHAPTER = 1.5
+REQUEST_TIMEOUT = 60
+MAX_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -91,12 +93,27 @@ def init_session(session) -> dict:
 # Chapter data
 # ---------------------------------------------------------------------------
 
+def _get_with_retry(session, url, **kwargs):
+    """GET with retry/backoff on timeouts and transient connection errors."""
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+    last = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return session.get(url, **kwargs)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last = e
+            wait = 2 ** attempt
+            print(f"    (timeout/conn error, retry in {wait}s…)")
+            time.sleep(wait)
+    raise last
+
+
 def fetch_chapter_pages(session, comic_id: str, chapter_no: int) -> dict:
     """Use /api/v4/contents/access endpoint (confirmed from browser DevTools)."""
     path = f"/api/v4/contents/access/{comic_id}/{chapter_no}?channel=PC"
     session.headers["x-auth-token"] = _auth_token()
     session.headers["Referer"] = f"{VIEWER_BASE}/comics/{comic_id}/{chapter_no}?ppt=PPT01"
-    r = session.get(f"{VIEWER_BASE}{path}", timeout=30)
+    r = _get_with_retry(session, f"{VIEWER_BASE}{path}")
     r.raise_for_status()
     return r.json()
 
@@ -206,12 +223,8 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("[*] Initializing session…")
-    try:
-        sess_data = init_session(session)
-        print(f"[*] Session response keys: {list(sess_data.keys())}")
-    except Exception as e:
-        print(f"[!] Session init failed: {e} — continuing anyway")
+    # Note: the browser flow hits /api/v4/contents/access directly with cookies +
+    # a random x-auth-token. No separate session-init call is required.
 
     # Resolve chapter range
     if args.chapter:
