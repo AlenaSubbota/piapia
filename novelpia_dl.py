@@ -148,7 +148,7 @@ def fetch_episode_list(session, novel_no):
     return episodes
 
 
-def fetch_episode_content(session, episode_no):
+def fetch_episode_content(session, episode_no, title_hint=None):
     try:
         meta = fetch_episode_meta(session, episode_no)
     except Exception as e:
@@ -166,8 +166,15 @@ def fetch_episode_content(session, episode_no):
         return None
 
     inner = d.get("result", {}).get("data", {})
+    # Title can live in the content payload, the episode meta, or the list entry.
+    title = (
+        inner.get("epi_title")
+        or meta.get("epi_title")
+        or meta.get("subject")
+        or (title_hint or f"Episode {episode_no}")
+    )
     return {
-        "epi_title": inner.get("epi_title", f"Episode {episode_no}"),
+        "epi_title": title,
         "epi_content": inner.get("epi_content", ""),
         "episode_no": episode_no,
     }
@@ -263,6 +270,7 @@ def main():
     print(f"[*] Author: {novel_info.get('writer_name', '?')}")
 
     # Episode list
+    title_by_ep = {}
     if args.episodes:
         episode_nos = [int(x.strip()) for x in args.episodes.split(",")]
         print(f"[*] Using {len(episode_nos)} specified episodes.")
@@ -272,11 +280,15 @@ def main():
             ep_list = fetch_episode_list(session, novel_no)
         except Exception as e:
             sys.exit(f"[!] Could not fetch episode list: {e}")
-        episode_nos = [
-            ep.get("episode_no") or ep.get("epi_no")
-            for ep in ep_list
-            if ep.get("episode_no") or ep.get("epi_no")
-        ]
+        episode_nos = []
+        for ep in ep_list:
+            en = ep.get("episode_no") or ep.get("epi_no")
+            if not en:
+                continue
+            episode_nos.append(en)
+            title_by_ep[en] = (
+                ep.get("epi_title") or ep.get("title") or ep.get("subject")
+            )
         print(f"[*] Found {len(episode_nos)} episodes.")
 
     # Fetch content
@@ -286,7 +298,7 @@ def main():
     AUTH_FAIL_LIMIT = 5  # stop early if auth keeps failing
     for i, ep_no in enumerate(episode_nos, 1):
         print(f"  [{i}/{len(episode_nos)}] ep {ep_no}…", end=" ", flush=True)
-        ch = fetch_episode_content(session, ep_no)
+        ch = fetch_episode_content(session, ep_no, title_hint=title_by_ep.get(ep_no))
         if ch is None or not ch["epi_content"].strip():
             print("skipped")
             skip += 1
@@ -294,10 +306,8 @@ def main():
             if auth_failures >= AUTH_FAIL_LIMIT and ok == 0:
                 print(
                     f"\n[!] {AUTH_FAIL_LIMIT} consecutive failures with no successes — "
-                    "likely missing LOGINKEY cookie. Stopping early.\n"
-                    "[*] Get fresh cookies (USERKEY, TKEY, LOGINKEY) from your browser:\n"
-                    "    Safari: Develop → Show Web Inspector → Storage → Cookies\n"
-                    "    Chrome: F12 → Application → Cookies → global.novelpia.com"
+                    "likely a missing/expired login-at token.\n"
+                    "    Pass a fresh --login-at value from the browser."
                 )
                 break
         else:
