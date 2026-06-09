@@ -129,8 +129,70 @@ def novel_no_from_episode(session, episode_no):
 
 
 def fetch_novel_info(session, novel_no):
-    data = api_get(session, "/v1/novel", novel_no=novel_no)
-    return data["result"]
+    # Try several parameter names — the global API is inconsistent
+    for param in ({"novel_no": novel_no}, {"novelNo": novel_no}, {"id": novel_no}):
+        try:
+            data = session.get(f"{API_BASE}/v1/novel", params=param, timeout=30)
+            if data.status_code < 400:
+                j = data.json()
+                if str(j.get("code", "0000")) == "0000":
+                    result = j.get("result", {})
+                    if result:
+                        return result
+        except Exception:
+            continue
+    # Fallback: try the novel page on global.novelpia.com to scrape basic metadata
+    try:
+        r = session.get(
+            f"https://global.novelpia.com/novel/{novel_no}", timeout=30
+        )
+        if r.status_code == 200:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(r.text, "lxml")
+            info: dict = {"novel_no": novel_no}
+            # Title
+            og_title = soup.find("meta", property="og:title")
+            if og_title:
+                info["title"] = og_title.get("content", "").strip()
+            # Description
+            og_desc = soup.find("meta", property="og:description")
+            if og_desc:
+                info["description"] = og_desc.get("content", "").strip()
+            # Cover image
+            og_img = soup.find("meta", property="og:image")
+            if og_img:
+                info["cover_url"] = og_img.get("content", "").strip()
+            # Author from structured data or page
+            author_tag = soup.find("span", class_=lambda c: c and "author" in c.lower())
+            if author_tag:
+                info["writer_name"] = author_tag.get_text(strip=True)
+            if info.get("title"):
+                return info
+    except Exception as e:
+        print(f"    · novel page scrape failed: {e}")
+    return {"novel_no": novel_no}
+
+
+def fetch_cover(session, novel_info) -> bytes | None:
+    """Download cover image bytes, trying known URL patterns."""
+    url = novel_info.get("cover_url") or novel_info.get("cover_img")
+    if not url:
+        novel_no = novel_info.get("novel_no", "")
+        candidates = [
+            f"https://img.novelpia.com/novel/{novel_no}/thumbnail.jpg",
+            f"https://img.novelpia.com/novel/{novel_no}/cover.jpg",
+            f"https://cover.novelpia.com/{novel_no}.jpg",
+        ]
+    else:
+        candidates = [url]
+    for u in candidates:
+        try:
+            r = session.get(u, timeout=20)
+            if r.status_code == 200 and r.content[:4] in (b"\xff\xd8\xff\xe0", b"\xff\xd8\xff\xe1", b"\x89PNG"):
+                return r.content
+        except Exception:
+            continue
+    return None
 
 
 def fetch_episode_list(session, novel_no):
@@ -206,14 +268,32 @@ def html_chapter(title, body_html):
     )
 
 
-def build_epub(novel_info, chapters, out_path):
+def build_epub(novel_info, chapters, out_path, cover_bytes=None):
     book = epub.EpubBook()
-    title = novel_info.get("title") or novel_info.get("novel_name", "Unknown")
-    author = novel_info.get("writer_name", "Unknown")
+    title = novel_info.get("title") or novel_info.get("novel_name") or f"novel_{novel_info.get('novel_no', 0)}"
+    author = novel_info.get("writer_name") or novel_info.get("author") or "Unknown"
+    description = novel_info.get("description") or novel_info.get("intro") or ""
+
     book.set_identifier(f"novelpia-{novel_info.get('novel_no', 0)}")
     book.set_title(title)
     book.set_language("ko")
     book.add_author(author)
+    if description:
+        book.add_metadata("DC", "description", description)
+
+    if cover_bytes:
+        # Detect image type
+        ext = "jpg" if cover_bytes[:2] == b"\xff\xd8" else "png"
+        mime = "image/jpeg" if ext == "jpg" else "image/png"
+        cover_item = epub.EpubItem(
+            uid="cover-image",
+            file_name=f"cover.{ext}",
+            media_type=mime,
+            content=cover_bytes,
+        )
+        book.add_item(cover_item)
+        book.set_cover(f"cover.{ext}", cover_bytes)
+
     eps, toc = [], []
     for idx, ch in enumerate(chapters, 1):
         ep = epub.EpubHtml(title=ch["epi_title"], file_name=f"chap_{idx:04d}.xhtml", lang="ko")
@@ -273,11 +353,22 @@ def main():
         novel_info = fetch_novel_info(session, novel_no)
     except Exception as e:
         print(f"[!] Could not fetch novel info: {e}\n[*] Continuing without metadata.")
-        novel_info = {"novel_no": novel_no, "title": f"novel_{novel_no}"}
+        novel_info = {"novel_no": novel_no}
 
-    title = novel_info.get("title") or novel_info.get("novel_name", f"novel_{novel_no}")
-    print(f"[*] Title : {title}")
-    print(f"[*] Author: {novel_info.get('writer_name', '?')}")
+    title = novel_info.get("title") or novel_info.get("novel_name") or f"novel_{novel_no}"
+    author = novel_info.get("writer_name") or novel_info.get("author") or "?"
+    description = novel_info.get("description") or novel_info.get("intro") or ""
+    print(f"[*] Title      : {title}")
+    print(f"[*] Author     : {author}")
+    if description:
+        print(f"[*] Description: {description[:120]}{'…' if len(description) > 120 else ''}")
+
+    print(f"[*] Fetching cover image…")
+    cover_bytes = fetch_cover(session, novel_info)
+    if cover_bytes:
+        print(f"[*] Cover      : {len(cover_bytes):,} bytes")
+    else:
+        print(f"[*] Cover      : not found")
 
     # Episode list
     title_by_ep = {}
@@ -313,7 +404,7 @@ def main():
             print("[!] Nothing collected — nothing to save.")
             return
         print(f"\n[*] Building EPUB ({len(chapters)} chapters) → {out_path}…")
-        build_epub(novel_info, chapters, out_path)
+        build_epub(novel_info, chapters, out_path, cover_bytes=cover_bytes)
         print(f"[+] Saved: {out_path} ({out_path.stat().st_size:,} bytes)")
 
     try:
