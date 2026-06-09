@@ -4,40 +4,33 @@
 Fetches all accessible episodes of a novel and packs them into an EPUB.
 Requires your session cookies from the browser or the Mac app.
 
-Usage:
-    python novelpia_dl.py --novel 12345 --cookies cookies.txt --out MyNovel.epub
+Usage (viewer URL, e.g. global.novelpia.com/viewer/167202):
+    python novelpia_dl.py --viewer 167202 --cookie "USERKEY=x; TKEY=y" --out Novel.epub
 
-Cookie file format (Netscape/curl, one line per cookie):
-    .novelpia.com  TRUE  /  FALSE  0  USERKEY  abc123
-    .novelpia.com  TRUE  /  FALSE  0  TKEY     def456
-    .novelpia.com  TRUE  /  FALSE  0  LOGINKEY ghi789
+Or if you know the novel_no:
+    python novelpia_dl.py --novel 12345 --cookie "USERKEY=x; TKEY=y" --out Novel.epub
 
-Or pass cookies directly:
-    python novelpia_dl.py --novel 12345 --cookie "USERKEY=abc; TKEY=def; LOGINKEY=ghi"
-
-pip install requests ebooklib beautifulsoup4 lxml
+pip install requests ebooklib
 """
 
 import argparse
 import http.cookiejar
-import json
 import sys
 import time
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
 from ebooklib import epub
 
 API_BASE = "https://api-global.novelpia.com"
-SLEEP_BETWEEN = 1.5  # seconds between episode fetches
+SLEEP_BETWEEN = 1.5
 
 
 # ---------------------------------------------------------------------------
-# Session setup
+# Session
 # ---------------------------------------------------------------------------
 
-def build_session(cookie_str: str | None, cookie_file: str | None) -> requests.Session:
+def build_session(cookie_str, cookie_file):
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -50,76 +43,63 @@ def build_session(cookie_str: str | None, cookie_file: str | None) -> requests.S
         "Referer": "https://global.novelpia.com/",
         "X-Requested-With": "XMLHttpRequest",
     })
-
     if cookie_file:
         jar = http.cookiejar.MozillaCookieJar(cookie_file)
         jar.load(ignore_discard=True, ignore_expires=True)
         s.cookies.update(jar)
-
     if cookie_str:
         for part in cookie_str.split(";"):
             part = part.strip()
             if "=" in part:
                 k, v = part.split("=", 1)
                 s.cookies.set(k.strip(), v.strip(), domain=".novelpia.com")
-
     return s
 
 
 # ---------------------------------------------------------------------------
-# API helpers
+# API
 # ---------------------------------------------------------------------------
 
-def api_get(session: requests.Session, path: str, **params) -> dict:
+def api_get(session, path, **params):
     r = session.get(f"{API_BASE}{path}", params=params, timeout=30)
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} on {path}: {r.text[:300]}")
     data = r.json()
     if str(data.get("code", "0000")) != "0000":
-        raise RuntimeError(f"API error on {path}: {data}")
+        raise RuntimeError(f"API error {data.get('code')} on {path}: {data.get('errmsg')}")
     return data
 
 
-NOVEL_INFO_PATHS = [
-    "/v1/novel",
-    "/v1/novel/info",
-    "/v1/novel/detail",
-]
-
-EPISODE_LIST_PATHS = [
-    "/v1/novel/episode/list",
-    "/v1/novel/episode-list",
-    "/v1/novel/episodes",
-]
+def fetch_episode_meta(session, episode_no):
+    """Fetch episode metadata; returns the full result dict."""
+    data = api_get(session, "/v1/novel/episode", episode_no=episode_no)
+    return data.get("result", {})
 
 
-def _try_paths(session, paths, **params):
-    last_err = None
-    for path in paths:
-        try:
-            return api_get(session, path, **params), path
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"All endpoints failed; last error: {last_err}")
+def novel_no_from_episode(session, episode_no):
+    """Resolve novel_no from any known episode_no."""
+    meta = fetch_episode_meta(session, episode_no)
+    novel_no = (
+        meta.get("novel_no")
+        or meta.get("novelNo")
+        or (meta.get("data") or {}).get("novel_no")
+    )
+    if not novel_no:
+        print(f"[!] Raw episode meta (for debugging): {meta}")
+        raise RuntimeError("Could not find novel_no in episode metadata.")
+    return int(novel_no)
 
 
-def fetch_novel_info(session: requests.Session, novel_no: int) -> dict:
-    data, _ = _try_paths(session, NOVEL_INFO_PATHS, novel_no=novel_no)
+def fetch_novel_info(session, novel_no):
+    data = api_get(session, "/v1/novel", novel_no=novel_no)
     return data["result"]
 
 
-def fetch_episode_list(session: requests.Session, novel_no: int) -> list[dict]:
-    """Returns all episodes across all pages."""
+def fetch_episode_list(session, novel_no):
     episodes = []
     page = 0
-    chosen_path = None
     while True:
-        if chosen_path is None:
-            data, chosen_path = _try_paths(
-                session, EPISODE_LIST_PATHS, novel_no=novel_no, page=page
-            )
-        else:
-            data = api_get(session, chosen_path, novel_no=novel_no, page=page)
+        data = api_get(session, "/v1/novel/episode/list", novel_no=novel_no, page=page)
         result = data.get("result", {})
         page_eps = result.get("episode") or result.get("episodes") or result.get("list") or []
         if not page_eps:
@@ -132,26 +112,24 @@ def fetch_episode_list(session: requests.Session, novel_no: int) -> list[dict]:
     return episodes
 
 
-def fetch_episode_content(session: requests.Session, episode_no: int) -> dict | None:
-    """Returns dict with keys: epi_title, epi_content (HTML string), or None if inaccessible."""
+def fetch_episode_content(session, episode_no):
     try:
-        meta = api_get(session, "/v1/novel/episode", episode_no=episode_no)
+        meta = fetch_episode_meta(session, episode_no)
     except Exception as e:
-        print(f"    ! meta fetch failed for ep {episode_no}: {e}")
+        print(f"    ! meta fail ep {episode_no}: {e}")
         return None
 
-    jwt = meta.get("result", {}).get("_t")
+    jwt = meta.get("_t")
     if not jwt:
-        # episode locked / not purchased
-        return None
+        return None  # locked / not purchased
 
     try:
-        content_data = api_get(session, "/v1/novel/episode/content", _t=jwt)
+        d = api_get(session, "/v1/novel/episode/content", _t=jwt)
     except Exception as e:
-        print(f"    ! content fetch failed for ep {episode_no}: {e}")
+        print(f"    ! content fail ep {episode_no}: {e}")
         return None
 
-    inner = content_data.get("result", {}).get("data", {})
+    inner = d.get("result", {}).get("data", {})
     return {
         "epi_title": inner.get("epi_title", f"Episode {episode_no}"),
         "epi_content": inner.get("epi_content", ""),
@@ -160,60 +138,40 @@ def fetch_episode_content(session: requests.Session, episode_no: int) -> dict | 
 
 
 # ---------------------------------------------------------------------------
-# EPUB builder
+# EPUB
 # ---------------------------------------------------------------------------
 
-def html_chapter(title: str, body_html: str) -> str:
-    safe = body_html.replace("&", "&amp;") if not body_html.strip().startswith("<") else body_html
+def html_chapter(title, body_html):
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"'
         ' "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'
-        '<html xmlns="http://www.w3.org/1999/xhtml">'
-        "<head>"
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head>'
         f'<title>{title}</title>'
-        '<style>body{{font-family:serif;line-height:1.7;margin:2em;}} p{{margin:.6em 0;}}</style>'
-        "</head>"
-        f"<body><h2>{title}</h2>{body_html}</body>"
-        "</html>"
+        '<style>body{font-family:serif;line-height:1.7;margin:2em;} p{margin:.6em 0;}</style>'
+        f'</head><body><h2>{title}</h2>{body_html}</body></html>'
     )
 
 
-def build_epub(
-    novel_info: dict,
-    chapters: list[dict],
-    out_path: Path,
-) -> None:
+def build_epub(novel_info, chapters, out_path):
     book = epub.EpubBook()
     title = novel_info.get("title") or novel_info.get("novel_name", "Unknown")
     author = novel_info.get("writer_name", "Unknown")
-
     book.set_identifier(f"novelpia-{novel_info.get('novel_no', 0)}")
     book.set_title(title)
     book.set_language("ko")
     book.add_author(author)
-
-    epub_chapters = []
-    toc = []
-
+    eps, toc = [], []
     for idx, ch in enumerate(chapters, 1):
-        ch_title = ch["epi_title"]
-        content = html_chapter(ch_title, ch["epi_content"])
-        ep = epub.EpubHtml(
-            title=ch_title,
-            file_name=f"chap_{idx:04d}.xhtml",
-            lang="ko",
-        )
-        ep.content = content.encode("utf-8")
+        ep = epub.EpubHtml(title=ch["epi_title"], file_name=f"chap_{idx:04d}.xhtml", lang="ko")
+        ep.content = html_chapter(ch["epi_title"], ch["epi_content"]).encode("utf-8")
         book.add_item(ep)
-        epub_chapters.append(ep)
-        toc.append(epub.Link(ep.file_name, ch_title, f"chap{idx}"))
-
+        eps.append(ep)
+        toc.append(epub.Link(ep.file_name, ch["epi_title"], f"chap{idx}"))
     book.toc = toc
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-    book.spine = ["nav"] + epub_chapters
-
+    book.spine = ["nav"] + eps
     epub.write_epub(str(out_path), book)
 
 
@@ -221,17 +179,18 @@ def build_epub(
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Download a Novelpia novel to EPUB.")
-    ap.add_argument("--novel", required=True, type=int, help="novel_no (from the URL)")
-    ap.add_argument("--out", help="Output .epub path (default: <title>.epub)")
-    ap.add_argument("--cookies", help="Path to Netscape cookie file")
-    ap.add_argument("--cookie", help='Cookie string, e.g. "USERKEY=x; TKEY=y; LOGINKEY=z"')
-    ap.add_argument("--sleep", type=float, default=SLEEP_BETWEEN, help="Seconds between requests")
-    ap.add_argument(
-        "--episodes",
-        help="Comma-separated episode_no list to fetch (default: all)",
-    )
+def main():
+    ap = argparse.ArgumentParser()
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--viewer", type=int, metavar="EPISODE_NO",
+                       help="Episode number from viewer URL (e.g. /viewer/167202)")
+    group.add_argument("--novel", type=int, metavar="NOVEL_NO",
+                       help="Novel number if known")
+    ap.add_argument("--out")
+    ap.add_argument("--cookies")
+    ap.add_argument("--cookie")
+    ap.add_argument("--sleep", type=float, default=SLEEP_BETWEEN)
+    ap.add_argument("--episodes", help="Comma-separated episode_no list to fetch instead of all")
     args = ap.parse_args()
 
     if not args.cookies and not args.cookie:
@@ -239,40 +198,54 @@ def main() -> None:
 
     session = build_session(args.cookie, args.cookies)
 
-    print(f"[*] Fetching novel info for novel_no={args.novel}…")
-    try:
-        novel_info = fetch_novel_info(session, args.novel)
-    except Exception as e:
-        print(f"[!] Could not fetch novel info: {e}")
-        print("[*] Continuing without metadata; using novel_no as title.")
-        novel_info = {"novel_no": args.novel, "title": f"novel_{args.novel}"}
+    # Resolve novel_no
+    if args.viewer:
+        print(f"[*] Resolving novel_no from viewer episode {args.viewer}…")
+        try:
+            novel_no = novel_no_from_episode(session, args.viewer)
+            print(f"[*] novel_no = {novel_no}")
+        except Exception as e:
+            sys.exit(f"[!] {e}")
+    else:
+        novel_no = args.novel
 
-    title = novel_info.get("title") or novel_info.get("novel_name", f"novel_{args.novel}")
+    # Novel metadata
+    print(f"[*] Fetching novel info…")
+    try:
+        novel_info = fetch_novel_info(session, novel_no)
+    except Exception as e:
+        print(f"[!] Could not fetch novel info: {e}\n[*] Continuing without metadata.")
+        novel_info = {"novel_no": novel_no, "title": f"novel_{novel_no}"}
+
+    title = novel_info.get("title") or novel_info.get("novel_name", f"novel_{novel_no}")
     print(f"[*] Title : {title}")
     print(f"[*] Author: {novel_info.get('writer_name', '?')}")
 
+    # Episode list
     if args.episodes:
         episode_nos = [int(x.strip()) for x in args.episodes.split(",")]
-        print(f"[*] Fetching {len(episode_nos)} specified episodes…")
+        print(f"[*] Using {len(episode_nos)} specified episodes.")
     else:
         print("[*] Fetching episode list…")
         try:
-            ep_list = fetch_episode_list(session, args.novel)
+            ep_list = fetch_episode_list(session, novel_no)
         except Exception as e:
             sys.exit(f"[!] Could not fetch episode list: {e}")
-        episode_nos = [ep["episode_no"] for ep in ep_list]
+        episode_nos = [
+            ep.get("episode_no") or ep.get("epi_no")
+            for ep in ep_list
+            if ep.get("episode_no") or ep.get("epi_no")
+        ]
         print(f"[*] Found {len(episode_nos)} episodes.")
 
+    # Fetch content
     chapters = []
-    ok = skip = fail = 0
+    ok = skip = 0
     for i, ep_no in enumerate(episode_nos, 1):
-        print(f"  [{i}/{len(episode_nos)}] episode {ep_no}…", end=" ", flush=True)
+        print(f"  [{i}/{len(episode_nos)}] ep {ep_no}…", end=" ", flush=True)
         ch = fetch_episode_content(session, ep_no)
-        if ch is None:
-            print("skipped (locked or no JWT)")
-            skip += 1
-        elif not ch["epi_content"].strip():
-            print("skipped (empty content)")
+        if ch is None or not ch["epi_content"].strip():
+            print("skipped")
             skip += 1
         else:
             print(f"ok — {ch['epi_title']!r}")
@@ -280,10 +253,9 @@ def main() -> None:
             ok += 1
         time.sleep(args.sleep)
 
-    print(f"\n[*] {ok} fetched, {skip} skipped, {fail} failed.")
-
+    print(f"\n[*] {ok} fetched, {skip} skipped.")
     if not chapters:
-        sys.exit("[!] No chapters collected — check your cookies or novel_no.")
+        sys.exit("[!] Nothing collected — check cookies or novel_no.")
 
     out_path = Path(args.out) if args.out else Path(f"{title}.epub")
     print(f"[*] Building EPUB → {out_path}…")
