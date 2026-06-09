@@ -206,11 +206,41 @@ def fetch_chapter_list(session, comic_id: str) -> list[dict]:
 # CBZ writer
 # ---------------------------------------------------------------------------
 
-def write_cbz(decoded: list[tuple[int, bytes]], out_path: Path) -> None:
-    """Zip decoded pages (page_number, bytes) into a CBZ, named by reading order."""
+def write_cbz(decoded: list[tuple[int, bytes]], out_path: Path, strip: int = 0) -> None:
+    """Zip decoded pages into a CBZ. If strip>0, merge every N pages vertically."""
+    pages = [img for _, img in sorted(decoded)]
+    if strip > 0:
+        pages = _make_strips(pages, strip)
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
-        for idx, (_pn, img) in enumerate(sorted(decoded), 1):
-            zf.writestr(f"{idx:04d}.{_ext(img)}", img)
+        for idx, img in enumerate(pages, 1):
+            ext = _ext(img)
+            zf.writestr(f"{idx:04d}.{ext}", img)
+
+
+def _make_strips(pages: list[bytes], n: int) -> list[bytes]:
+    """Merge every n pages vertically into one JPEG image."""
+    try:
+        from PIL import Image
+    except ImportError:
+        raise RuntimeError("Pillow is required for --strip: pip install Pillow")
+    import io
+    result = []
+    for i in range(0, len(pages), n):
+        chunk = pages[i:i + n]
+        imgs = [Image.open(io.BytesIO(b)) for b in chunk]
+        w = max(im.width for im in imgs)
+        h = sum(im.height for im in imgs)
+        canvas = Image.new("RGB", (w, h), (255, 255, 255))
+        y = 0
+        for im in imgs:
+            # Center narrower images horizontally
+            x = (w - im.width) // 2
+            canvas.paste(im.convert("RGB"), (x, y))
+            y += im.height
+        buf = io.BytesIO()
+        canvas.save(buf, format="JPEG", quality=95)
+        result.append(buf.getvalue())
+    return result
 
 
 def merge_cbz(cbz_paths: list[Path], out_path: Path) -> None:
@@ -248,6 +278,8 @@ def main():
                     help="Keep the per-chapter temp dir with raw/decoded images")
     ap.add_argument("--bundle", type=int, default=0, metavar="N",
                     help="Merge every N chapters into one CBZ (e.g. --bundle 5)")
+    ap.add_argument("--strip", type=int, default=0, metavar="N",
+                    help="Merge every N pages vertically into one image (requires Pillow)")
     args = ap.parse_args()
 
     if not args.cookies and not args.cookie:
@@ -356,7 +388,7 @@ def main():
                 decoded.append((int(dec_file.stem), dec_file.read_bytes()))
         if decoded:
             cbz_path = out_dir / f"{args.comic}_ch{ch_no:04d}.cbz"
-            write_cbz(decoded, cbz_path)
+            write_cbz(decoded, cbz_path, strip=args.strip)
             print(f"  [+] {cbz_path} ({cbz_path.stat().st_size:,} bytes, {len(decoded)} pages)")
         if not args.keep_temp:
             shutil.rmtree(work, ignore_errors=True)
