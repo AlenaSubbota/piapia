@@ -45,8 +45,10 @@ def build_session(cookie_str: str | None, cookie_file: str | None) -> requests.S
             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
         ),
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Origin": "https://global.novelpia.com",
         "Referer": "https://global.novelpia.com/",
+        "X-Requested-With": "XMLHttpRequest",
     })
 
     if cookie_file:
@@ -77,8 +79,32 @@ def api_get(session: requests.Session, path: str, **params) -> dict:
     return data
 
 
+NOVEL_INFO_PATHS = [
+    "/v1/novel",
+    "/v1/novel/info",
+    "/v1/novel/detail",
+]
+
+EPISODE_LIST_PATHS = [
+    "/v1/novel/episode/list",
+    "/v1/novel/episode-list",
+    "/v1/novel/episodes",
+]
+
+
+def _try_paths(session, paths, **params):
+    last_err = None
+    for path in paths:
+        try:
+            return api_get(session, path, **params), path
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"All endpoints failed; last error: {last_err}")
+
+
 def fetch_novel_info(session: requests.Session, novel_no: int) -> dict:
-    data = api_get(session, "/v1/novel", novel_no=novel_no)
+    data, _ = _try_paths(session, NOVEL_INFO_PATHS, novel_no=novel_no)
     return data["result"]
 
 
@@ -86,14 +112,21 @@ def fetch_episode_list(session: requests.Session, novel_no: int) -> list[dict]:
     """Returns all episodes across all pages."""
     episodes = []
     page = 0
+    chosen_path = None
     while True:
-        data = api_get(session, "/v1/novel/episode/list", novel_no=novel_no, page=page)
+        if chosen_path is None:
+            data, chosen_path = _try_paths(
+                session, EPISODE_LIST_PATHS, novel_no=novel_no, page=page
+            )
+        else:
+            data = api_get(session, chosen_path, novel_no=novel_no, page=page)
         result = data.get("result", {})
-        page_eps = result.get("episode", [])
+        page_eps = result.get("episode") or result.get("episodes") or result.get("list") or []
         if not page_eps:
             break
         episodes.extend(page_eps)
-        if len(page_eps) < result.get("limit", 20):
+        limit = result.get("limit", len(page_eps))
+        if len(page_eps) < limit:
             break
         page += 1
     return episodes
@@ -210,7 +243,9 @@ def main() -> None:
     try:
         novel_info = fetch_novel_info(session, args.novel)
     except Exception as e:
-        sys.exit(f"[!] Could not fetch novel info: {e}")
+        print(f"[!] Could not fetch novel info: {e}")
+        print("[*] Continuing without metadata; using novel_no as title.")
+        novel_info = {"novel_no": args.novel, "title": f"novel_{args.novel}"}
 
     title = novel_info.get("title") or novel_info.get("novel_name", f"novel_{args.novel}")
     print(f"[*] Title : {title}")
