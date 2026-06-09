@@ -85,7 +85,7 @@ def _get_with_retry(session, url, headers=None):
         except (httpx.TimeoutException, httpx.TransportError) as e:
             last = e
             wait = 2 ** attempt
-            print(f"    (timeout/conn error, retry in {wait}s…)")
+            print(f"    ({type(e).__name__}: {e}; retry in {wait}s…)")
             time.sleep(wait)
     raise last
 
