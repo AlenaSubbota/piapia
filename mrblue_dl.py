@@ -98,30 +98,13 @@ def fetch_chapter_pages(session, comic_id: str, chapter_no: int) -> dict:
 # Image fetch + decryption
 # ---------------------------------------------------------------------------
 
-def _xor_decrypt(data: bytes, nonce_code: str) -> bytes:
-    """XOR-decrypt image bytes using nonceCode.
-    MrBlue uses a simple XOR cipher: key bytes are derived from
-    the nonceCode integer. We try a few variants."""
-    n = int(nonce_code) % (256 ** 4)
-    key = n.to_bytes(4, "little")  # 4-byte key, repeating
-    return bytes(b ^ key[i % 4] for i, b in enumerate(data))
-
-
 def decrypt_image(data: bytes, nonce_code: str) -> bytes:
-    """Attempt to decrypt image. Returns plaintext bytes."""
-    # If already a valid image, no decryption needed
+    """Decrypt image bytes — algorithm confirmed from bee.wasm: bitwise NOT of each byte."""
     if _is_image(data):
         return data
-    # Try XOR with 4-byte little-endian key
-    candidate = _xor_decrypt(data, nonce_code)
+    candidate = bytes(b ^ 0xff for b in data)
     if _is_image(candidate):
         return candidate
-    # Try XOR with single byte (nonce % 256)
-    key_byte = int(nonce_code) % 256
-    candidate2 = bytes(b ^ key_byte for b in data)
-    if _is_image(candidate2):
-        return candidate2
-    # Return raw and let the caller decide
     return data
 
 
@@ -239,12 +222,15 @@ def main():
             print(f"  [!] Failed: {e}")
             continue
 
-        nonce = ch_data.get("nonceCode", "0")
-        pages = ch_data.get(args.quality) or ch_data.get("hd") or ch_data.get("sd") or []
+        # v4 API wraps data in "response" key
+        resp = ch_data.get("response", ch_data)
+        nonce = resp.get("nonceCode", ch_data.get("nonceCode", "0"))
+        quality = args.quality
+        pages = resp.get(quality) or resp.get("hd") or resp.get("sd") or []
         print(f"  [*] {len(pages)} pages | nonce={nonce}")
 
         if not pages:
-            print(f"  [!] No pages. Full response: {list(ch_data.keys())}")
+            print(f"  [!] No pages. Full response keys: {list(ch_data.keys())} / resp keys: {list(resp.keys())}")
             continue
 
         images = []
